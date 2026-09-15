@@ -1,0 +1,44 @@
+# Deployed by Coolify as a compose application.
+#
+# Two external networks, each for exactly one reason:
+#   equibles -> the Equibles app's own bridge network, named for its app uuid. The
+#               `db` container already answers to the alias `db` there, which is how
+#               this service reads the database WITHOUT the database being exposed
+#               on any host port.
+#   coolify  -> the shared network every Coolify app joins. meridian-core is on it,
+#               so the alias below gives consumers a stable address that does not
+#               depend on a generated container name.
+services:
+  api:
+    build: .
+    image: ghcr.io/stoyanov-x/equibles-api:latest
+    restart: unless-stopped
+    environment:
+      EQUIBLES_DB_HOST: db
+      EQUIBLES_DB_PORT: "5432"
+      EQUIBLES_DB_NAME: equibles
+      # The read-only role. Never `postgres`: this credential cannot write even if
+      # the service is compromised, and that is the point of creating it.
+      EQUIBLES_DB_USER: meridian_ro
+      EQUIBLES_DB_PASSWORD: ${EQUIBLES_RO_PASSWORD:?set EQUIBLES_RO_PASSWORD}
+      # Optional. Empty means open, which is acceptable only because the service is
+      # reachable solely from the app networks.
+      EQUIBLES_API_KEY: ${EQUIBLES_API_KEY:-}
+      EQUIBLES_API_MAX_ROWS: ${EQUIBLES_API_MAX_ROWS:-5000}
+    networks:
+      equibles: {}
+      coolify:
+        aliases:
+          - equibles-api
+    expose:
+      - "8080"
+    # Uncomment for host-side debugging; not needed for Coolify routing.
+    # ports:
+    #   - "127.0.0.1:8083:8080"
+
+networks:
+  equibles:
+    external: true
+    name: lisfl00u818sk9dbws7psox1
+  coolify:
+    external: true

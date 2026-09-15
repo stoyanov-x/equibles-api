@@ -1,0 +1,36 @@
+[project]
+name = "equibles-api"
+version = "0.1.0"
+description = "Read-only HTTP API over the Equibles Postgres database, for the Meridian stack."
+requires-python = ">=3.11"
+
+# The one dependency, and the reason this service exists at all: meridian-core is
+# deliberately stdlib-only, so it cannot speak the Postgres wire protocol. Splitting
+# the protocol out here keeps that property intact.
+dependencies = ["psycopg[binary]>=3.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/equibles_api"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

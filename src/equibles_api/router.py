@@ -14,13 +14,26 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Protocol
 
-from . import sql
+from . import openapi, sql
 from .config import Settings
 from .db import DatabaseError
 
 DEFAULT_MIN_BARS = 1000
 DEFAULT_LIMIT = 1500
 DEFAULT_LOOKBACK_DAYS = 2200
+
+#: The documented API surface. The OpenAPI document must cover exactly these, and a
+#: test asserts it -- a documented path that 404s is worse than no documentation.
+API_PATHS: tuple[str, ...] = (
+    "/healthz",
+    "/v1/coverage",
+    "/v1/panel.csv",
+    "/v1/holdings/summary",
+)
+
+#: Reachable without a credential. ``/healthz`` so container healthchecks work;
+#: the docs so the API can be inspected before anyone holds the key.
+PUBLIC_PATHS: tuple[str, ...] = ("/", "/docs", "/openapi.json", "/healthz")
 
 
 class BadRequest(ValueError):
@@ -111,11 +124,8 @@ def route(
     settings: Settings,
 ) -> Response:
     """Map a request to a response. Never raises for bad input."""
-    # /healthz is intentionally unauthenticated so container healthchecks and the
-    # Coolify probe need no key. It reveals only whether the database answers, to a
-    # caller that already has to be on the app network to reach it.
-    if path == "/healthz":
-        return _json(200, {"ok": db.healthy()})
+    if path in PUBLIC_PATHS:
+        return _public(path=path, db=db, settings=settings)
     if not authorized(headers, settings):
         return _json(401, {"error": "unauthorized"})
     if method not in ("GET", "HEAD"):
@@ -127,6 +137,31 @@ def route(
     except DatabaseError as exc:
         # 503, not 500: the caller's request was fine, the dependency is not.
         return _json(503, {"error": str(exc)})
+
+
+def _public(*, path: str, db: QuerySource, settings: Settings) -> Response:
+    """Routes that work without a key. See :data:`PUBLIC_PATHS`."""
+    if path == "/":
+        # A browser landing on the root should not meet a 401 and conclude the
+        # service is broken.
+        return Response(302, "text/plain; charset=utf-8", [b""], {"Location": "/docs"})
+    if path == "/healthz":
+        # 200 even when the database is down: a healthcheck that fails here is
+        # indistinguishable from a dead process, which is the distinction it exists
+        # to draw. `ok` carries the answer instead.
+        return _json(200, {"ok": db.healthy()})
+    if path == "/openapi.json":
+        # Not routed through _json: that sorts keys, which reorders the paths into
+        # alphabetical noise. Indented also keeps it diffable.
+        body = (json.dumps(openapi.document(settings), indent=2) + "\n").encode("utf-8")
+        return Response(200, "application/json", [body])
+    if path == "/docs":
+        return Response(
+            200, "text/html; charset=utf-8", [openapi.DOCS_HTML.encode("utf-8")]
+        )
+    # Explicit rather than a catch-all: adding a name to PUBLIC_PATHS should not
+    # silently start serving the docs page for it.
+    return _json(404, {"error": f"no route for {path}"})
 
 
 def _dispatch(

@@ -78,10 +78,18 @@ legacy `ports_exposes` field shows `3000` and is ignored.
 
 | Route | Purpose |
 |---|---|
+| `GET /` | 302 to `/docs`. A browser landing on the root should not meet a 401 and conclude the service is broken. |
+| `GET /docs` | Swagger UI. Unauthenticated. Use **Authorize** to paste the key (`persistAuthorization` is on). |
+| `GET /openapi.json` | The OpenAPI 3.1 document that page renders. Unauthenticated. |
 | `GET /healthz` | `{"ok": bool}`. Unauthenticated, so it works when a key is set. Always 200 when the process is alive; `ok` reports the database. |
 | `GET /v1/coverage` | Row/symbol/date counts and the span. Cheap pre-flight before asking for a panel. |
 | `GET /v1/panel.csv` | The price panel: `Date,ListedTicker,AdjustedClose`, liquidity-ranked. |
 | `GET /v1/holdings/summary` | 13F counters, including CUSIP coverage and processed data sets — "holdings are low" is unactionable without knowing which of those is the constraint. |
+
+The document is written by hand (there is no framework to introspect), so its real
+risk is drift. `router.API_PATHS` is the single list of served paths, and tests
+assert the document covers **exactly** that list in both directions: nothing
+documented that 404s, nothing served that is undocumented.
 
 ### Panel parameters
 

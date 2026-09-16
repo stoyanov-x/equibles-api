@@ -45,6 +45,35 @@ Credentials come from a **read-only role**, `meridian_ro`, not the `postgres`
 superuser. The password lives in `/etc/meridian/equibles-ro.env` (mode 0600) on the
 host. Verified behaviour: `SELECT` works, `CREATE TABLE` is refused.
 
+### Deploying on Coolify (two things verified the hard way)
+
+1. **Declaring external networks works.** Coolify rewrites the compose before
+deploying and adds its own service-level `networks:` key, but it **merges** rather
+than replaces. The generated file was:
+
+   ```yaml
+           networks:
+               equibles: {  }
+               coolify:
+                   aliases:
+                       - equibles-api
+               <app-uuid>: null
+   ```
+
+   Note that Coolify does **not** put compose apps on the `coolify` network by
+default (only `dockerfile`/`image` apps get that), which is why the alias above has
+to be declared explicitly for meridian-core to reach this service.
+
+2. **Never remap a secret with `${VAR:?}` in the compose file.** Compose
+interpolates during the **build** step, and Coolify passes only *build-time*
+variables to that step — so a runtime-only secret fails the build before any image
+exists. Marking the password build-time to work around it would bake it into the
+image metadata. The service reads `EQUIBLES_RO_PASSWORD` directly instead, because
+Coolify injects application env vars into every service.
+
+Coolify also sets the routing port from the service's `expose:` (8080 here). The
+legacy `ports_exposes` field shows `3000` and is ignored.
+
 ## Endpoints
 
 | Route | Purpose |
@@ -79,7 +108,7 @@ closes the connection without a new status. Treat a truncated panel as a failure
 
 | Variable | Default | Notes |
 |---|---|---|
-| `EQUIBLES_DB_PASSWORD` | — | **Required.** Boot fails without it. |
+| `EQUIBLES_DB_PASSWORD` | — | **Required.** Boot fails without it. Also accepts `EQUIBLES_RO_PASSWORD` (the name Coolify sets). |
 | `EQUIBLES_DB_HOST` | `db` | The container alias on the Equibles network. |
 | `EQUIBLES_DB_PORT` | `5432` | |
 | `EQUIBLES_DB_NAME` | `equibles` | |

@@ -14,6 +14,24 @@ def test_password_is_required() -> None:
         Settings.from_env({})
 
 
+def test_ro_password_is_accepted_as_an_alias() -> None:
+    """Coolify sets EQUIBLES_RO_PASSWORD, naming the read-only role.
+
+    Accepting it means the deployment needs no rename in the UI, and no
+    ``${VAR}`` remapping in the compose file -- which is what broke the first
+    deploy, because compose interpolates at build time and a runtime secret is not
+    visible there.
+    """
+    assert Settings.from_env({"EQUIBLES_RO_PASSWORD": "s"}).db_password == "s"
+
+
+def test_db_password_takes_precedence_when_both_are_set() -> None:
+    settings = Settings.from_env(
+        {"EQUIBLES_DB_PASSWORD": "explicit", "EQUIBLES_RO_PASSWORD": "injected"}
+    )
+    assert settings.db_password == "explicit"
+
+
 def test_defaults_target_the_read_only_role() -> None:
     settings = Settings.from_env({"EQUIBLES_DB_PASSWORD": "secret"})
     assert settings.db_host == "db"

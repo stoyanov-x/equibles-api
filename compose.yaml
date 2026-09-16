@@ -20,11 +20,18 @@ services:
       # The read-only role. Never `postgres`: this credential cannot write even if
       # the service is compromised, and that is the point of creating it.
       EQUIBLES_DB_USER: meridian_ro
-      EQUIBLES_DB_PASSWORD: ${EQUIBLES_RO_PASSWORD:?set EQUIBLES_RO_PASSWORD}
-      # Optional. Empty means open, which is acceptable only because the service is
-      # reachable solely from the app networks.
-      EQUIBLES_API_KEY: ${EQUIBLES_API_KEY:-}
-      EQUIBLES_API_MAX_ROWS: ${EQUIBLES_API_MAX_ROWS:-5000}
+      #
+      # NOTE: the secrets are deliberately NOT declared here, and are NOT remapped
+      # through `${VAR}` interpolation. Coolify injects the application's own
+      # environment variables into every service, so the container reads them
+      # directly. Using `${EQUIBLES_RO_PASSWORD:?...}` here looked safer and was a
+      # bug: compose interpolates during the BUILD step, and Coolify passes only
+      # *build-time* variables there, so a runtime-only secret fails the build
+      # before the image exists. Marking the password build-time to work around
+      # that would bake it into the image metadata.
+      #
+      # Set in Coolify: EQUIBLES_RO_PASSWORD (required), and optionally
+      # EQUIBLES_API_KEY / EQUIBLES_API_MAX_ROWS.
     networks:
       equibles: {}
       coolify:

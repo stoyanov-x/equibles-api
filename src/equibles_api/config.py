@@ -64,9 +64,17 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         src = os.environ if env is None else env
-        password = src.get("EQUIBLES_DB_PASSWORD", "")
+        # Two accepted names for one value. ``EQUIBLES_RO_PASSWORD`` is what is set
+        # in Coolify (naming the read-only role, which is the point), and
+        # ``EQUIBLES_DB_PASSWORD`` is the neutral name used elsewhere. Accepting
+        # both is deliberate: it keeps the deployment working whether the value is
+        # injected by Coolify or passed directly.
+        password = src.get("EQUIBLES_DB_PASSWORD") or src.get("EQUIBLES_RO_PASSWORD") or ""
         if not password:
-            raise ConfigError("EQUIBLES_DB_PASSWORD is required (use the read-only role)")
+            raise ConfigError(
+                "no database password: set EQUIBLES_DB_PASSWORD "
+                "(or EQUIBLES_RO_PASSWORD), using the read-only role"
+            )
         return cls(
             db_host=src.get("EQUIBLES_DB_HOST", "db"),
             db_port=_int(src, "EQUIBLES_DB_PORT", 5432),

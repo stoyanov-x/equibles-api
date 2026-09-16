@@ -83,7 +83,7 @@ legacy `ports_exposes` field shows `3000` and is ignored.
 | `GET /openapi.json` | The OpenAPI 3.1 document that page renders. Unauthenticated. |
 | `GET /healthz` | `{"ok": bool}`. Unauthenticated, so it works when a key is set. Always 200 when the process is alive; `ok` reports the database. |
 | `GET /v1/coverage` | Row/symbol/date counts and the span. Cheap pre-flight before asking for a panel. |
-| `GET /v1/panel.csv` | The price panel: `Date,ListedTicker,AdjustedClose`, liquidity-ranked. |
+| `GET /v1/panel.csv` | The price panel: `Date,ListedTicker,AdjustedClose,Volume`, liquidity-ranked. `Volume` is required by the consumer's capacity gate, so a panel without it cannot promote anything. |
 | `GET /v1/holdings/summary` | 13F counters, including CUSIP coverage and processed data sets — "holdings are low" is unactionable without knowing which of those is the constraint. |
 
 The document is written by hand (there is no framework to introspect), so its real

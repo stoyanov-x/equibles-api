@@ -17,6 +17,13 @@ from __future__ import annotations
 #: Ranking by average dollar volume over the *whole* window, then filtering rows to
 #: the same window, is deliberate: ranking on a shorter window than we export would
 #: quietly let in names that were liquid only recently.
+#:
+#: ``Volume`` rides along with the close because the consumer gates on capacity, and
+#: capacity is dollar volume. Without it a consumer that reads prices from here still
+#: has to fetch volume per symbol from a separate provider -- which fails for exactly
+#: the long tail of tickers this panel exists to add, and fails as *unknown* capacity,
+#: which the gate treats as a rejection. The column is free: it is already in the
+#: source table and already used by the liquidity ranking below.
 PANEL_SQL = """
 COPY (
   WITH liquid AS (
@@ -31,7 +38,7 @@ COPY (
     ORDER BY adusd DESC NULLS LAST
     LIMIT %(limit)s
   )
-  SELECT p."Date", p."ListedTicker", p."AdjustedClose"
+  SELECT p."Date", p."ListedTicker", p."AdjustedClose", p."Volume"
   FROM "ListedDailyStockPrice" p
   JOIN liquid l ON l.ticker = p."ListedTicker"
   WHERE p."Date" >= %(since)s

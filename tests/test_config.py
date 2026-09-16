@@ -68,3 +68,19 @@ def test_connect_kwargs_never_include_the_api_key() -> None:
         {"EQUIBLES_DB_PASSWORD": "s", "EQUIBLES_API_KEY": "k"}
     )
     assert set(settings.connect_kwargs()) == {"host", "port", "dbname", "user", "password"}
+
+
+def test_cors_allowlist_is_empty_by_default() -> None:
+    assert Settings.from_env({"EQUIBLES_DB_PASSWORD": "s"}).allowed_origins == ()
+
+
+def test_cors_allowlist_is_split_and_cleaned() -> None:
+    """Whitespace and trailing slashes are stripped, and blanks dropped, so a
+    hand-typed list does not silently fail to match."""
+    settings = Settings.from_env(
+        {
+            "EQUIBLES_DB_PASSWORD": "s",
+            "EQUIBLES_API_ALLOWED_ORIGINS": " https://a.example/ , , https://b.example ",
+        }
+    )
+    assert settings.allowed_origins == ("https://a.example", "https://b.example")

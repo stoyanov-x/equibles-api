@@ -34,6 +34,11 @@ def make_handler(
         def do_HEAD(self) -> None:
             self._serve("HEAD")
 
+        def do_OPTIONS(self) -> None:
+            # Preflight. The router answers only for allowed origins, and only with
+            # GET/HEAD, so a browser can probe /healthz and nothing more.
+            self._serve("OPTIONS")
+
         def _serve(self, method: str) -> None:
             parts = urlsplit(self.path)
             response = route(

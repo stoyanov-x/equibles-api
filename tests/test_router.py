@@ -274,3 +274,104 @@ def test_sql_uses_named_parameters_only() -> None:
     for statement in (sql.PANEL_SQL, sql.COVERAGE_SQL):
         assert "%(since)s" in statement
         assert "{" not in statement, f"f-string braces found in {statement[:40]!r}"
+
+
+# -- CORS -----------------------------------------------------------------------
+
+DASH = "https://dash.example"
+
+
+def cors_settings(origins: str | None = None, **extra: str) -> Settings:
+    env = {"EQUIBLES_DB_PASSWORD": "s", **extra}
+    if origins is not None:
+        env["EQUIBLES_API_ALLOWED_ORIGINS"] = origins
+    return Settings.from_env(env)
+
+
+def test_no_cors_headers_by_default(settings: Settings) -> None:
+    """An unconfigured service must hand a browser nothing, even when asked."""
+    resp = call(FakeDB(), settings, path="/healthz", headers={"origin": DASH})
+    assert "Access-Control-Allow-Origin" not in resp.headers
+
+
+def test_allowed_origin_gets_the_header_and_varies() -> None:
+    resp = call(FakeDB(), cors_settings(DASH), path="/healthz", headers={"origin": DASH})
+    assert resp.headers["Access-Control-Allow-Origin"] == DASH
+    # Without Vary a shared cache can replay this header to another origin.
+    assert resp.headers["Vary"] == "Origin"
+
+
+def test_unlisted_origin_is_refused() -> None:
+    resp = call(
+        FakeDB(), cors_settings(DASH), path="/healthz", headers={"origin": "https://evil.example"}
+    )
+    assert "Access-Control-Allow-Origin" not in resp.headers
+
+
+def test_absent_origin_gets_no_cors_header() -> None:
+    """A server-to-server call has no Origin and should not be told about CORS."""
+    assert "Access-Control-Allow-Origin" not in call(
+        FakeDB(), cors_settings(DASH), path="/healthz"
+    ).headers
+
+
+def test_allowlist_tolerates_spaces_and_trailing_slashes() -> None:
+    """An `Origin` header never carries a trailing slash, so a sloppy entry that
+    still 'looks right' would silently disable CORS."""
+    resp = call(
+        FakeDB(),
+        cors_settings(f"{DASH}/ , https://other.example"),
+        path="/healthz",
+        headers={"origin": DASH},
+    )
+    assert resp.headers["Access-Control-Allow-Origin"] == DASH
+
+
+def test_cors_is_applied_to_keyed_responses_too() -> None:
+    """A 401 without the header reads as a CORS failure in the browser, hiding the
+    real reason from whoever is debugging it."""
+    s = cors_settings(DASH, EQUIBLES_API_KEY="k")
+    resp = call(FakeDB(), s, path="/v1/coverage", headers={"origin": DASH})
+    assert resp.status == 401
+    assert resp.headers["Access-Control-Allow-Origin"] == DASH
+
+
+def test_preflight_is_204_and_offers_only_get_head() -> None:
+    resp = call(
+        FakeDB(), cors_settings(DASH), path="/healthz", method="OPTIONS", headers={"origin": DASH}
+    )
+    assert resp.status == 204
+    assert resp.headers["Access-Control-Allow-Methods"] == "GET, HEAD"
+
+
+def test_preflight_never_advertises_request_headers() -> None:
+    """The load-bearing line of this whole feature: without
+    Access-Control-Allow-Headers, a preflight for `Authorization` fails, so no page
+    can call /v1/* -- which is what keeps the key out of a browser bundle."""
+    resp = call(
+        FakeDB(),
+        cors_settings(DASH),
+        path="/v1/coverage",
+        method="OPTIONS",
+        headers={"origin": DASH, "access-control-request-headers": "authorization"},
+    )
+    assert "Access-Control-Allow-Headers" not in resp.headers
+
+
+def test_preflight_needs_no_api_key() -> None:
+    """Browsers never send credentials on a preflight, so requiring one makes every
+    cross-origin call fail before the real request is attempted."""
+    s = cors_settings(DASH, EQUIBLES_API_KEY="k")
+    resp = call(FakeDB(), s, path="/v1/coverage", method="OPTIONS", headers={"origin": DASH})
+    assert resp.status == 204
+
+
+def test_preflight_from_a_disallowed_origin_carries_nothing() -> None:
+    resp = call(
+        FakeDB(),
+        cors_settings(DASH),
+        path="/healthz",
+        method="OPTIONS",
+        headers={"origin": "https://evil.example"},
+    )
+    assert "Access-Control-Allow-Origin" not in resp.headers

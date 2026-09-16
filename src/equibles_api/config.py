@@ -44,6 +44,16 @@ def _int(env: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
+def _origins(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated origin allowlist.
+
+    Trailing slashes are stripped because an `Origin` header never carries one, and
+    a mismatch here silently disables CORS -- which shows up as a permanently red
+    health dot rather than as a configuration error.
+    """
+    return tuple(o.strip().rstrip("/") for o in raw.split(",") if o.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved configuration for one process."""
@@ -54,6 +64,10 @@ class Settings:
     db_user: str
     db_password: str
     api_key: str | None
+    #: Browser origins allowed to read responses. Empty (the default) means no CORS
+    #: headers at all: this service is meant for server-to-server use, and opening
+    #: it to browsers should be a deliberate act.
+    allowed_origins: tuple[str, ...]
     host: str
     port: int
     #: Hard ceiling on rows any single panel request may ask for. A client cannot
@@ -84,6 +98,7 @@ class Settings:
             # Empty/absent means "no auth": the service is expected to be reachable
             # only from the app network. Set it when that assumption stops holding.
             api_key=src.get("EQUIBLES_API_KEY") or None,
+            allowed_origins=_origins(src.get("EQUIBLES_API_ALLOWED_ORIGINS", "")),
             host=src.get("EQUIBLES_API_HOST", "0.0.0.0"),
             port=_int(src, "EQUIBLES_API_PORT", 8080),
             max_rows=_int(src, "EQUIBLES_API_MAX_ROWS", 5000),

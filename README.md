@@ -122,6 +122,7 @@ closes the connection without a new status. Treat a truncated panel as a failure
 | `EQUIBLES_DB_NAME` | `equibles` | |
 | `EQUIBLES_DB_USER` | `meridian_ro` | Never defaults to `postgres`. |
 | `EQUIBLES_API_KEY` | unset | When set, all `/v1/*` routes need `Authorization: Bearer <key>` or `X-API-Key`. |
+| `EQUIBLES_API_ALLOWED_ORIGINS` | unset | Comma-separated browser origins allowed to read responses. **Unset means no CORS headers at all** — opening the service to browsers should be a deliberate act. |
 | `EQUIBLES_API_HOST` / `_PORT` | `0.0.0.0` / `8080` | |
 | `EQUIBLES_API_MAX_ROWS` | `5000` | Ceiling on `limit`; stops an unbounded export. |
 | `EQUIBLES_API_STATEMENT_TIMEOUT_MS` | `600000` | Applied per connection. |
@@ -152,3 +153,19 @@ docker run --rm -e PGPASSWORD="$EQUIBLES_RO_PASSWORD" --network lisfl00u818sk9db
   truncated.
 - The API key is optional because the service is only reachable on the app networks.
   Set it if that assumption ever stops holding.
+
+### CORS (for the dashboard health tile)
+
+`EQUIBLES_API_ALLOWED_ORIGINS` is empty by default, so no CORS headers are sent and
+a browser cannot read anything. Set it to the dashboard origin to enable the health
+probe:
+
+```
+EQUIBLES_API_ALLOWED_ORIGINS=https://dash.example
+```
+
+The preflight is deliberately incomplete: it advertises `GET, HEAD` and **no**
+`Access-Control-Allow-Headers`. That is the mechanism, not an oversight — a browser
+preflight for an `Authorization` header fails, so `/v1/*` is unreachable from
+JavaScript. A key inlined in a browser bundle is not a secret, so the tile probes
+`/healthz` (unauthenticated by design) and `/v1/*` stays server-to-server.

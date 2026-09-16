@@ -114,6 +114,34 @@ def _resolve_since(query: Mapping[str, list[str]]) -> date:
     return date.today() - timedelta(days=lookback)
 
 
+def _with_headers(response: Response, extra: Mapping[str, str]) -> Response:
+    """Copy ``response`` with ``extra`` headers merged in (or return it unchanged)."""
+    if not extra:
+        return response
+    return Response(
+        response.status,
+        response.content_type,
+        response.body,
+        {**response.headers, **extra},
+    )
+
+
+def cors_headers(origin: str, settings: Settings) -> dict[str, str]:
+    """CORS headers for a browser request, when the origin is allowed.
+
+    Empty allowlist means no CORS headers at all -- the default, because this
+    service is built for server-to-server use and enabling it for browsers should be
+    a deliberate act rather than an accident.
+
+    ``Vary: Origin`` is not optional: without it a shared cache can replay one
+    origin's `Access-Control-Allow-Origin` to a different origin.
+    """
+    origin = origin.strip()
+    if not origin or origin not in settings.allowed_origins:
+        return {}
+    return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+
+
 def route(
     *,
     method: str,
@@ -124,19 +152,38 @@ def route(
     settings: Settings,
 ) -> Response:
     """Map a request to a response. Never raises for bad input."""
+    cors = cors_headers(headers.get("origin", ""), settings)
+
+    if method == "OPTIONS":
+        # Preflight, and deliberately incomplete: it advertises GET/HEAD and no
+        # request headers. The browser probe we support is an unauthenticated GET of
+        # /healthz, which needs no preflight at all; withholding
+        # `Access-Control-Allow-Headers` is what keeps an API key from being sendable
+        # from a page -- and a key inlined in a browser bundle is not a secret
+        # anyway. So `/v1/*` stays unreachable from JavaScript on purpose.
+        return _with_headers(
+            Response(
+                204,
+                "text/plain; charset=utf-8",
+                [b""],
+                {"Access-Control-Allow-Methods": "GET, HEAD", "Access-Control-Max-Age": "600"},
+            ),
+            cors,
+        )
+
     if path in PUBLIC_PATHS:
-        return _public(path=path, db=db, settings=settings)
+        return _with_headers(_public(path=path, db=db, settings=settings), cors)
     if not authorized(headers, settings):
-        return _json(401, {"error": "unauthorized"})
+        return _with_headers(_json(401, {"error": "unauthorized"}), cors)
     if method not in ("GET", "HEAD"):
-        return _json(405, {"error": f"method {method} is not allowed"})
+        return _with_headers(_json(405, {"error": f"method {method} is not allowed"}), cors)
     try:
-        return _dispatch(path=path, query=query, db=db, settings=settings)
+        return _with_headers(_dispatch(path=path, query=query, db=db, settings=settings), cors)
     except BadRequest as exc:
-        return _json(400, {"error": str(exc)})
+        return _with_headers(_json(400, {"error": str(exc)}), cors)
     except DatabaseError as exc:
         # 503, not 500: the caller's request was fine, the dependency is not.
-        return _json(503, {"error": str(exc)})
+        return _with_headers(_json(503, {"error": str(exc)}), cors)
 
 
 def _public(*, path: str, db: QuerySource, settings: Settings) -> Response:

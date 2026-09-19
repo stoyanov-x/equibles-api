@@ -16,6 +16,7 @@ import pytest
 
 from equibles_api import datasets, sql
 from equibles_api.config import Settings
+from equibles_api.db import DatabaseError
 from equibles_api.router import API_PATHS, MAX_DATE, MAX_TICKERS, Response, route
 
 
@@ -166,7 +167,12 @@ def test_the_export_binds_every_caller_supplied_value(settings: Settings) -> Non
     kind, text, params = db.calls[0]
     assert kind == "copy_csv"
     assert params is not None
-    assert params["tickers"] == ("AAPL", "MSFT")
+    # A LIST, not a tuple: psycopg adapts a tuple to a SQL record `('AAPL','MSFT')`,
+    # which fails to bind to `::text[]` with `malformed array literal`. This is the
+    # assertion that would have caught that, and a fake query source cannot catch it
+    # any other way because it never runs the SQL.
+    assert isinstance(params["tickers"], list)
+    assert params["tickers"] == ["AAPL", "MSFT"]
     assert params["limit"] == 10
     assert params["since"].isoformat() == "2021-01-04"
     assert params["until"].isoformat() == "2022-01-04"
@@ -185,6 +191,65 @@ def test_the_export_is_bounded(settings: Settings) -> None:
         assert "LIMIT %(limit)s" in sql.dataset_export_sql(dataset)
 
 
+class FailingOnFirstChunkDB(RecordingDB):
+    """Raises while streaming, the way a malformed query does.
+
+    Modelled on the real failure: psycopg adapts a tuple to a record, `'(AAPL)'`
+    fails to bind to `::text[]`, and the error surfaces on the first `next()` --
+    after the status line had already been written.
+    """
+
+    def __init__(self, message: str = "malformed array literal: \"(AAPL,MSFT)\"") -> None:
+        super().__init__()
+        self.message = message
+
+    def copy_csv(
+        self, sql_text: str, params: Mapping[str, Any] | None = None
+    ) -> Iterable[bytes]:
+        self.calls.append(("copy_csv", sql_text, params))
+
+        def stream() -> Iterable[bytes]:
+            raise DatabaseError(self.message)
+            yield b""  # pragma: no cover -- makes this a generator
+
+        return stream()
+
+
+# -- a broken query must not look like an empty result ---------------------------
+
+
+def test_a_query_that_fails_on_the_first_chunk_is_a_503_not_an_empty_200(
+    settings: Settings,
+) -> None:
+    """The worst failure shape is a silent no-data answer.
+
+    `copy_csv` is lazy and the HTTP layer writes the status before touching the
+    body, so an invalid query reached the client as `200` with zero bytes -- which a
+    backtest consumes as "this range has no rows" rather than "the server is
+    broken". `_started` pulls one chunk while a status code can still be chosen.
+    """
+    resp = call(FailingOnFirstChunkDB(), settings, path="/v1/short-volume.csv")
+    assert resp.status == 503
+    assert "malformed array literal" in payload(resp)["error"]
+
+
+def test_the_same_guard_covers_the_panel(settings: Settings) -> None:
+    """The panel export had the identical footgun and is the larger one."""
+    resp = call(FailingOnFirstChunkDB(), settings, path="/v1/panel.csv")
+    assert resp.status == 503
+
+
+def test_a_successful_export_still_streams_every_chunk(settings: Settings) -> None:
+    """`_started` must prepend the peeked chunk, not swallow it."""
+    db = RecordingDB()
+    resp = call(db, settings, path="/v1/dividends.csv")
+
+    assert resp.status == 200
+    body = b"".join(resp.body)
+    assert body.startswith(b"Date,Ticker")
+    assert body.endswith(b"2026-01-02,AAPL\n")
+
+
 # -- parameter validation -------------------------------------------------------
 
 
@@ -196,7 +261,7 @@ def test_tickers_are_split_trimmed_and_preserved(settings: Settings) -> None:
         path="/v1/dividends.csv",
         query={"tickers": [" AAPL , BRK.B ,^VIX "]},
     )
-    assert db.calls[0][2]["tickers"] == ("AAPL", "BRK.B", "^VIX")
+    assert db.calls[0][2]["tickers"] == ["AAPL", "BRK.B", "^VIX"]
 
 
 def test_an_empty_tickers_filter_means_every_ticker(settings: Settings) -> None:

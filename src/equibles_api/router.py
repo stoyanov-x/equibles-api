@@ -8,6 +8,7 @@ standing up a database.
 from __future__ import annotations
 
 import hmac
+import itertools
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -162,8 +163,14 @@ def _bool_param(query: Mapping[str, list[str]], name: str, default: bool) -> boo
     raise BadRequest(f"{name} must be a boolean, got {raw!r}")
 
 
-def _ticker_param(query: Mapping[str, list[str]]) -> tuple[str, ...] | None:
+def _ticker_param(query: Mapping[str, list[str]]) -> list[str] | None:
     """A comma-separated ticker filter, or None meaning "every ticker".
+
+    A **list**, deliberately, not a tuple. psycopg adapts a Python tuple to a SQL
+    *record* -- `('AAPL','MSFT')` -- and binding that to `::text[]` fails with
+    `malformed array literal`, while a list adapts to a real array. The two look
+    interchangeable and are not, which is exactly the kind of mistake a fake query
+    source cannot catch because it never runs the SQL.
 
     None is bound as SQL NULL and the clause short-circuits, so an unfiltered
     export does not build a huge array of every ticker in the table.
@@ -171,9 +178,9 @@ def _ticker_param(query: Mapping[str, list[str]]) -> tuple[str, ...] | None:
     values = query.get("tickers")
     if not values:
         return None
-    tickers = tuple(
+    tickers = [
         part.strip() for value in values for part in value.split(",") if part.strip()
-    )
+    ]
     if not tickers:
         return None
     if len(tickers) > MAX_TICKERS:
@@ -182,6 +189,29 @@ def _ticker_param(query: Mapping[str, list[str]]) -> tuple[str, ...] | None:
         if not _TICKER_RE.fullmatch(ticker):
             raise BadRequest(f"tickers contains an invalid symbol {ticker!r}")
     return tickers
+
+
+def _started(chunks: Iterable[bytes]) -> Iterable[bytes]:
+    """Pull the first chunk NOW, so a query error is not reported as `200` + empty.
+
+    ``copy_csv`` runs the query lazily -- psycopg only executes on first iteration
+    -- and the HTTP layer writes the status line before touching the body. So a
+    malformed query (a bad array binding, a dropped column) used to reach the client
+    as a clean `200` with zero bytes, indistinguishable from "this range has no
+    rows". That is the worst possible failure shape: a silent no-data answer that a
+    backtest happily consumes as an empty market.
+
+    Forcing one chunk here runs the query while a status code can still be chosen,
+    so it raises into the caller's handler and becomes a 503. Errors after the first
+    chunk still close the connection mid-stream, which the docs already warn about
+    -- but those are genuine mid-transfer failures, not typos in our own SQL.
+    """
+    stream = iter(chunks)
+    try:
+        head = [next(stream)]
+    except StopIteration:
+        head = []
+    return itertools.chain(head, stream)
 
 
 def _with_headers(response: Response, extra: Mapping[str, str]) -> Response:
@@ -297,7 +327,7 @@ def _dispatch(
         return Response(
             200,
             "text/csv; charset=utf-8",
-            db.copy_csv(sql.PANEL_SQL, params),
+            _started(db.copy_csv(sql.PANEL_SQL, params)),
             {"X-Panel-Since": since.isoformat(), "X-Panel-Limit": str(limit)},
         )
 
@@ -359,9 +389,11 @@ def _dataset_csv(
     response = Response(
         200,
         "text/csv; charset=utf-8",
-        db.copy_csv(
-            sql.dataset_export_sql(dataset),
-            {"since": since, "until": until, "tickers": tickers, "limit": limit},
+        _started(
+            db.copy_csv(
+                sql.dataset_export_sql(dataset),
+                {"since": since, "until": until, "tickers": tickers, "limit": limit},
+            )
         ),
         {
             "X-Dataset": dataset.name,

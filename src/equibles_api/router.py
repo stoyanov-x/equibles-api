@@ -9,26 +9,46 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Protocol
 
-from . import openapi, sql
+from . import datasets, openapi, sql
 from .config import Settings
 from .db import DatabaseError
 
 DEFAULT_MIN_BARS = 1000
 DEFAULT_LIMIT = 1500
 DEFAULT_LOOKBACK_DAYS = 2200
+#: Row cap for a dataset export. Rows, not symbols -- unlike the panel, where
+#: `limit` counts names. A dataset export is a time series per ticker, so the
+#: same number means something very different in the two places.
+DEFAULT_DATASET_LIMIT = 5000
+#: Upper bound on a `tickers` filter, so one request cannot ask the database to
+#: build an enormous `= ANY(...)` array.
+MAX_TICKERS = 500
+#: Deliberately permissive on shape and strict on rejection. Equibles' tickers are
+#: exact, not case-folded, and include dotted (`BRK.B`), suffixed (`BARC.L`) and
+#: caret-prefixed (`^VIX`) forms -- so this rejects whitespace, quotes, commas and
+#: semicolons (the characters that matter for injection into a log or a filter)
+#: without pretending to know every venue's grammar.
+_TICKER_RE = re.compile(r"[A-Za-z0-9.^/_=-]{1,32}")
 
 #: The documented API surface. The OpenAPI document must cover exactly these, and a
 #: test asserts it -- a documented path that 404s is worse than no documentation.
+#:
+#: The dataset paths are generated from the registry rather than listed, so adding
+#: a dataset cannot leave the documentation behind: `API_PATHS` grows with it and
+#: the OpenAPI check fails until the document covers it.
 API_PATHS: tuple[str, ...] = (
     "/healthz",
+    "/v1/catalogue",
     "/v1/coverage",
-    "/v1/panel.csv",
     "/v1/holdings/summary",
+    "/v1/panel.csv",
+    *(f"/v1/{dataset.name}.csv" for dataset in datasets.DATASETS),
 )
 
 #: Reachable without a credential. ``/healthz`` so container healthchecks work;
@@ -112,6 +132,56 @@ def _resolve_since(query: Mapping[str, list[str]]) -> date:
             raise BadRequest(f"since must be an ISO date like 2020-01-02, got {raw!r}") from exc
     lookback = _int_param(query, "lookback_days", DEFAULT_LOOKBACK_DAYS, 1, 20_000)
     return date.today() - timedelta(days=lookback)
+
+
+#: Stands in for "no upper bound". A sentinel rather than a NULL keeps the export
+#: SQL uniform -- `date <= %(until)s` holds whether or not the caller supplied one
+#: -- so there is no second query shape to keep correct.
+MAX_DATE = date(9999, 12, 31)
+
+
+def _resolve_until(query: Mapping[str, list[str]]) -> date:
+    raw = (query.get("until") or [""])[0].strip()
+    if not raw:
+        return MAX_DATE
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise BadRequest(f"until must be an ISO date like 2026-01-02, got {raw!r}") from exc
+
+
+def _bool_param(query: Mapping[str, list[str]], name: str, default: bool) -> bool:
+    values = query.get(name)
+    if not values or not values[0].strip():
+        return default
+    raw = values[0].strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise BadRequest(f"{name} must be a boolean, got {raw!r}")
+
+
+def _ticker_param(query: Mapping[str, list[str]]) -> tuple[str, ...] | None:
+    """A comma-separated ticker filter, or None meaning "every ticker".
+
+    None is bound as SQL NULL and the clause short-circuits, so an unfiltered
+    export does not build a huge array of every ticker in the table.
+    """
+    values = query.get("tickers")
+    if not values:
+        return None
+    tickers = tuple(
+        part.strip() for value in values for part in value.split(",") if part.strip()
+    )
+    if not tickers:
+        return None
+    if len(tickers) > MAX_TICKERS:
+        raise BadRequest(f"tickers is capped at {MAX_TICKERS} symbols, got {len(tickers)}")
+    for ticker in tickers:
+        if not _TICKER_RE.fullmatch(ticker):
+            raise BadRequest(f"tickers contains an invalid symbol {ticker!r}")
+    return tickers
 
 
 def _with_headers(response: Response, extra: Mapping[str, str]) -> Response:
@@ -234,4 +304,70 @@ def _dispatch(
     if path == "/v1/holdings/summary":
         return _json(200, db.query_one(sql.HOLDINGS_SQL))
 
+    if path == "/v1/catalogue":
+        return _catalogue(query=query, db=db)
+
+    # Placed after the explicit routes above so `/v1/panel.csv` -- which shares the
+    # shape but has different `limit` semantics -- keeps its own handling.
+    prefix, _, filename = path.rpartition("/")
+    if prefix == "/v1" and filename.endswith(".csv"):
+        return _dataset_csv(filename[: -len(".csv")], query=query, db=db, settings=settings)
+
     return _json(404, {"error": f"no route for {path}"})
+
+
+def _catalogue(*, query: Mapping[str, list[str]], db: QuerySource) -> Response:
+    """What is available, and optionally how far back it goes.
+
+    Coverage is opt-in because it is one query per dataset. The default call is
+    served from the registry with no database round trip at all, so a consumer can
+    discover the surface even when the database is down.
+    """
+    with_coverage = _bool_param(query, "coverage", False)
+    entries: list[dict[str, Any]] = []
+    for dataset in datasets.DATASETS:
+        entry: dict[str, Any] = {
+            "name": dataset.name,
+            "path": f"/v1/{dataset.name}.csv",
+            "summary": dataset.summary,
+            "description": dataset.description,
+            "date_column": dataset.date_column,
+            "columns": [column.name for column in dataset.columns],
+        }
+        if with_coverage:
+            entry["coverage"] = db.query_one(sql.dataset_coverage_sql(dataset))
+        entries.append(entry)
+    return _json(200, {"datasets": entries})
+
+
+def _dataset_csv(
+    name: str,
+    *,
+    query: Mapping[str, list[str]],
+    db: QuerySource,
+    settings: Settings,
+) -> Response:
+    dataset = datasets.BY_NAME.get(name)
+    if dataset is None:
+        return _json(404, {"error": f"unknown dataset {name!r}"})
+    since = _resolve_since(query)
+    until = _resolve_until(query)
+    if until < since:
+        raise BadRequest(f"until {until} is before since {since}")
+    tickers = _ticker_param(query)
+    limit = _int_param(query, "limit", DEFAULT_DATASET_LIMIT, 1, settings.max_rows)
+    response = Response(
+        200,
+        "text/csv; charset=utf-8",
+        db.copy_csv(
+            sql.dataset_export_sql(dataset),
+            {"since": since, "until": until, "tickers": tickers, "limit": limit},
+        ),
+        {
+            "X-Dataset": dataset.name,
+            "X-Dataset-Since": since.isoformat(),
+            "X-Dataset-Until": ("" if until == MAX_DATE else until.isoformat()),
+            "X-Dataset-Limit": str(limit),
+        },
+    )
+    return response

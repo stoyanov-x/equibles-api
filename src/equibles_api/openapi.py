@@ -57,7 +57,6 @@ def document(settings: Settings) -> dict[str, Any]:
     # Imported inside the function, not at module scope: `router` imports this
     # module, so a top-level import would be circular.
     from .router import DEFAULT_LIMIT, DEFAULT_LOOKBACK_DAYS, DEFAULT_MIN_BARS
-
     lookback = {
         "name": "lookback_days",
         "in": "query",
@@ -77,7 +76,24 @@ def document(settings: Settings) -> dict[str, Any]:
         "description": "Inclusive ISO date lower bound. Overrides `lookback_days`.",
         "schema": {"type": "string", "format": "date", "example": "2020-01-02"},
     }
-    return {
+    until = {
+        "name": "until",
+        "in": "query",
+        "required": False,
+        "description": "Inclusive ISO date upper bound. Omitted means no upper bound.",
+        "schema": {"type": "string", "format": "date", "example": "2026-01-02"},
+    }
+    tickers = {
+        "name": "tickers",
+        "in": "query",
+        "required": False,
+        "description": (
+            "Comma-separated symbols to restrict the export. Symbols are matched "
+            "exactly and are NOT case-folded. Omitted means every ticker."
+        ),
+        "schema": {"type": "string", "example": "AAPL,MSFT"},
+    }
+    document: dict[str, Any] = {
         "openapi": "3.1.0",
         "info": {
             "title": "equibles-api",
@@ -119,6 +135,35 @@ def document(settings: Settings) -> dict[str, Any]:
                                 }
                             },
                         }
+                    },
+                }
+            },
+            "/v1/catalogue": {
+                "get": {
+                    "summary": "What datasets exist, and optionally their coverage",
+                    "description": (
+                        "The discovery surface. Returns every exportable dataset with "
+                        "its path, columns and the date column callers filter on.\n\n"
+                        "`coverage=1` adds the first and last date (and ticker count) "
+                        "per dataset, which is the cheap way to answer 'is there "
+                        "enough history here for my backtest' before pulling anything. "
+                        "It costs one query per dataset, so it is opt-in; the default "
+                        "call needs no database at all."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "coverage",
+                            "in": "query",
+                            "required": False,
+                            "description": "Include per-dataset date coverage.",
+                            "schema": {"type": "boolean", "default": False},
+                        }
+                    ],
+                    "responses": {
+                        "200": {"description": "The dataset catalogue"},
+                        "400": {"description": "A parameter was missing or out of range"},
+                        "401": {"description": "Missing or wrong API key"},
+                        "503": {"description": "The database is unreachable"},
                     },
                 }
             },
@@ -228,4 +273,69 @@ def document(settings: Settings) -> dict[str, Any]:
                 "apiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
             }
         },
+    }
+    document["paths"].update(
+        _dataset_paths(settings, since=since, lookback=lookback, until=until, tickers=tickers)
+    )
+    return document
+
+
+def _dataset_paths(
+    settings: Settings,
+    *,
+    since: dict[str, Any],
+    lookback: dict[str, Any],
+    until: dict[str, Any],
+    tickers: dict[str, Any],
+) -> dict[str, Any]:
+    """The `/v1/<dataset>.csv` entries, generated from the registry.
+
+    Generated rather than hand-written: `router.API_PATHS` is derived from the same
+    registry, and the test that compares the two is what keeps a new dataset from
+    being served-but-undocumented or documented-but-404.
+    """
+    from . import datasets as registry
+    from .router import DEFAULT_DATASET_LIMIT
+
+    limit = {
+        "name": "limit",
+        "in": "query",
+        "required": False,
+        "description": (
+            "Maximum number of ROWS. Note this differs from `/v1/panel.csv`, where "
+            "`limit` caps symbols instead.\n\n"
+            "Rows are ordered by date then ticker and then truncated, so hitting "
+            "this cap silently drops the tail rather than sampling the window. "
+            "Narrow `since` or `tickers` instead of relying on `limit` to bound a "
+            "large export."
+        ),
+        "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": settings.max_rows,
+            "default": DEFAULT_DATASET_LIMIT,
+        },
+    }
+    responses = {
+        "200": {"description": "The dataset as CSV"},
+        "400": {"description": "A parameter was missing or out of range"},
+        "401": {"description": "Missing or wrong API key"},
+        "404": {"description": "Unknown dataset"},
+        "503": {"description": "The database is unreachable"},
+    }
+    return {
+        f"/v1/{dataset.name}.csv": {
+            "get": {
+                "summary": dataset.summary,
+                "description": (
+                    f"{dataset.description}\n\n"
+                    "Streams CSV ordered by date then ticker. **A 200 means the "
+                    "stream started** -- a mid-export failure closes the connection, "
+                    "so a truncated body must be treated as a failed request."
+                ),
+                "parameters": [since, lookback, until, tickers, limit],
+                "responses": responses,
+            }
+        }
+        for dataset in registry.DATASETS
     }

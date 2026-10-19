@@ -64,10 +64,27 @@ def test_malformed_numbers_fail_at_boot(env: dict[str, str], expected: str) -> N
 
 
 def test_connect_kwargs_never_include_the_api_key() -> None:
+    """The connection options are exactly the database's, never the service's.
+
+    The timeout options are part of the list because libpq wants them at connect
+    time (untimed connects are what let a wedged database look like a hung
+    request), but the assertion is still a closed set: anything new has to be
+    added here deliberately.
+    """
     settings = Settings.from_env(
         {"EQUIBLES_DB_PASSWORD": "s", "EQUIBLES_API_KEY": "k"}
     )
-    assert set(settings.connect_kwargs()) == {"host", "port", "dbname", "user", "password"}
+    kwargs = settings.connect_kwargs()
+    assert set(kwargs) == {
+        "host",
+        "port",
+        "dbname",
+        "user",
+        "password",
+        "connect_timeout",
+        "tcp_user_timeout",
+    }
+    assert "k" not in kwargs.values()
 
 
 def test_cors_allowlist_is_empty_by_default() -> None:

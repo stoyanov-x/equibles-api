@@ -19,6 +19,6 @@ EXPOSE 8080
 
 # /healthz is unauthenticated precisely so this works when EQUIBLES_API_KEY is set.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4).status == 200 else 1)"
+    CMD python -c "import json,sys,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)); sys.exit(0 if d.get('ok') else 1)"
 
 CMD ["python", "-m", "equibles_api"]

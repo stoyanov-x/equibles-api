@@ -29,6 +29,8 @@ class ConnectKwargs(TypedDict):
     dbname: str
     user: str
     password: str
+    connect_timeout: int
+    tcp_user_timeout: int
 
 
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -74,6 +76,16 @@ class Settings:
     #: make the service materialise an unbounded export by passing a big `limit`.
     max_rows: int
     statement_timeout_ms: int
+    #: How long to wait for a TCP connection to the database. Without it, a database
+    #: that is reachable but not answering (a restarting container, a full listen
+    #: backlog) makes a request hang until the client gives up -- which is how
+    #: `/healthz` turned into a timeout instead of an `ok:false`.
+    connect_timeout_s: int = 10
+    #: libpq's tcp_user_timeout: the kernel closes a connection whose data has been
+    #: unacknowledged for this long. This is what reaps a `COPY` whose consumer
+    #: walked away -- the server otherwise keeps streaming into a dead socket for the
+    #: full statement_timeout (10 minutes by default here), holding a backend.
+    tcp_user_timeout_ms: int = 60_000
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -103,6 +115,8 @@ class Settings:
             port=_int(src, "EQUIBLES_API_PORT", 8080),
             max_rows=_int(src, "EQUIBLES_API_MAX_ROWS", 5000),
             statement_timeout_ms=_int(src, "EQUIBLES_API_STATEMENT_TIMEOUT_MS", 600_000),
+            connect_timeout_s=_int(src, "EQUIBLES_API_CONNECT_TIMEOUT_S", 10),
+            tcp_user_timeout_ms=_int(src, "EQUIBLES_API_TCP_USER_TIMEOUT_MS", 60_000),
         )
 
     def connect_kwargs(self) -> ConnectKwargs:
@@ -112,4 +126,6 @@ class Settings:
             "dbname": self.db_name,
             "user": self.db_user,
             "password": self.db_password,
+            "connect_timeout": self.connect_timeout_s,
+            "tcp_user_timeout": self.tcp_user_timeout_ms,
         }

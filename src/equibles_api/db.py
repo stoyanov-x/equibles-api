@@ -94,9 +94,24 @@ class Database:
             conn.close()
 
     def healthy(self) -> bool:
-        """True when a trivial query succeeds. Never raises."""
+        """True when a trivial query succeeds. Never raises.
+
+        Deliberately **not** :meth:`query_one`: that takes the shared lock, so a
+        single slow query would make this return late instead of returning false.
+        A healthcheck that can be blocked by the workload cannot distinguish "this
+        service is wedged" from "this service is busy", which is the whole point of
+        having one. A fresh connection costs milliseconds and always answers.
+        """
         try:
-            row = self.query_one("SELECT 1 AS ok")
+            conn = self._open()
         except DatabaseError:
             return False
-        return row.get("ok") == 1
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                row = cur.fetchone()
+            return bool(row is not None and row[0] == 1)
+        except psycopg.Error:
+            return False
+        finally:
+            conn.close()

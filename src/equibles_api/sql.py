@@ -5,8 +5,15 @@ here than usual: this process holds a database credential, so a formatting mista
 is not a bad response, it is the whole point of the service failing.
 
 The table and column names are quoted because Equibles' schema is PascalCase
-(`"ListedDailyStockPrice"`, `"AdjustedClose"`), and Postgres folds unquoted
+(`"EquityDailyStockPrice"`, `"AdjustedClose"`), and Postgres folds unquoted
 identifiers to lowercase.
+
+**Renamed upstream, 2026-10.** `"ListedDailyStockPrice"` became
+`"EquityDailyStockPrice"` and its `"ListedTicker"` column became `"SourceTicker"`
+as part of the equity-identity cutover. The output column is still aliased to
+`"ListedTicker"` so the CSV header contract consumers parse does not change;
+only the source moved. `DailyShortVolume` and `FailToDeliver` were NOT renamed and
+still carry `"ListedTicker"`.
 """
 
 from __future__ import annotations
@@ -30,21 +37,21 @@ PANEL_SQL = """
 COPY (
   WITH liquid AS (
     SELECT
-      "ListedTicker" AS ticker,
+      "SourceTicker" AS ticker,
       count(*) AS bars,
       avg("Close" * "Volume") AS adusd
-    FROM "ListedDailyStockPrice"
+    FROM "EquityDailyStockPrice"
     WHERE "Date" >= %(since)s
     GROUP BY 1
     HAVING count(*) >= %(min_bars)s
     ORDER BY adusd DESC NULLS LAST
     LIMIT %(limit)s
   )
-  SELECT p."Date", p."ListedTicker", p."AdjustedClose", p."Volume"
-  FROM "ListedDailyStockPrice" p
-  JOIN liquid l ON l.ticker = p."ListedTicker"
+  SELECT p."Date", p."SourceTicker" AS "ListedTicker", p."AdjustedClose", p."Volume"
+  FROM "EquityDailyStockPrice" p
+  JOIN liquid l ON l.ticker = p."SourceTicker"
   WHERE p."Date" >= %(since)s
-  ORDER BY p."ListedTicker", p."Date"
+  ORDER BY p."SourceTicker", p."Date"
 ) TO STDOUT WITH CSV HEADER
 """
 
@@ -53,11 +60,11 @@ COPY (
 COVERAGE_SQL = """
 SELECT
   count(*) AS rows,
-  count(DISTINCT "ListedTicker") AS symbols,
+  count(DISTINCT "SourceTicker") AS symbols,
   count(DISTINCT "Date") AS dates,
   min("Date") AS first_date,
   max("Date") AS last_date
-FROM "ListedDailyStockPrice"
+FROM "EquityDailyStockPrice"
 WHERE "Date" >= %(since)s
 """
 

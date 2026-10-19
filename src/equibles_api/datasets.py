@@ -19,9 +19,9 @@ should not have to know which is which, so each dataset declares the expression
 that yields a plain ticker and the joins it needs are applied here.
 
 The upstream identity model, for whoever extends this: ``EquityListing`` holds
-ticker + market, ``CommonStock`` holds the issuer's primary ticker, and
-``EquityIssuer`` links a filing to a ``CommonStock`` (issuers are per-CIK, while
-listings are per-venue -- one issuer can have several).
+ticker + market, ``EquitySecurity`` is the instrument (ISIN, CUSIP) and belongs to
+one ``EquityIssuer`` (per-CIK). ``CommonStock`` no longer exists -- the 2026-10
+cutover replaced it, and anything still joining to it is broken.
 """
 
 from __future__ import annotations
@@ -126,9 +126,23 @@ DATASETS: tuple[Dataset, ...] = (
         table='"InsiderTransaction"',
         date_column='p."TransactionDate"',
         ticker='cs."Ticker"',
+        # The identity cutover removed "CommonStock", which used to be reachable
+        # through "EquityIssuer"."CommonStockId". An issuer now owns one or more
+        # "EquitySecurity" rows, and a security is listed on one or more
+        # "EquityListing" rows (89 securities here have more than one).
+        #
+        # A plain join would therefore duplicate a transaction once per listing -
+        # silent, plausible-looking row multiplication in an export a backtest
+        # consumes. The LATERAL picks exactly one ticker per issuer: an active
+        # listing first, then the lowest id, so the same transaction always
+        # resolves to the same ticker run to run.
         joins=(
-            'JOIN "EquityIssuer" ei ON ei."Id" = p."EquityIssuerId" '
-            'JOIN "CommonStock" cs ON cs."Id" = ei."CommonStockId"'
+            "JOIN LATERAL ("
+            'SELECT el."Ticker" FROM "EquityListing" el '
+            'JOIN "EquitySecurity" es ON es."Id" = el."EquitySecurityId" '
+            'WHERE es."EquityIssuerId" = p."EquityIssuerId" '
+            'ORDER BY el."Active" DESC, el."Id" ASC LIMIT 1'
+            ') cs ON TRUE'
         ),
         columns=(
             Column("TransactionDate", 'p."TransactionDate"'),

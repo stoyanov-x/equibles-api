@@ -39,9 +39,14 @@ services:
           - equibles-api
     expose:
       - "8080"
-    # Uncomment for host-side debugging; not needed for Coolify routing.
-    # ports:
-    #   - "127.0.0.1:8083:8080"
+    # Coolify's "Ports Mappings" field is ignored for Docker Compose build packs
+    # (verified on 4.1.2: the generated compose came out with no `ports:` at all),
+    # so a host publication has to live here. The defaults are loopback-only and
+    # keep local development working exactly as the commented-out line below did;
+    # the Pi deployment overrides both through its own environment variables so the
+    # Hetzner box can reach the service over NetBird.
+    ports:
+      - "${EQUIBLES_API_BIND:-127.0.0.1}:${EQUIBLES_API_EXPOSE_PORT:-8083}:8080"
 
 networks:
   equibles:
